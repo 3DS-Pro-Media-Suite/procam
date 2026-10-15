@@ -1,0 +1,3 @@
+[submodule "ftpserver"]
+	path = ftpserver
+	url = ../ftpserver
