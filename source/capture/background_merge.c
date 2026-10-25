@@ -13,6 +13,7 @@
 #include "saver.h"
 #include "settings.h"
 #include "shot_names.h"
+#include "time_units.h"
 #include "toast.h"
 
 // One merge runs at a time, on its own thread with a helper on another core. The camera thread queues shots,
@@ -34,6 +35,9 @@
 #define HELPER_CORE_NEW3DS 0 // beside the UI; the merge itself is on core 2
 #define HELPER_CORE_OLD3DS 1 // the system core
 #define CORE1_APP_PERCENT 30 // the app's share of the system core, as libctru's examples use
+
+// A merge thread waiting for another sleeps this long: a zero sleep would not let lower priorities run.
+#define MERGE_YIELD_NS (100 * NANOSECONDS_PER_MICROSECOND)
 
 enum {
 	CORE1_SHARE_REFUSED = -1,
@@ -171,6 +175,11 @@ static void join_merge_helper(void *handle)
 	threadFree((Thread)handle);
 }
 
+static void yield_merge_thread(void)
+{
+	svcSleepThread(MERGE_YIELD_NS);
+}
+
 // Old 3DS: the helper can run on the system core once the app has a share of it. Asked once and kept: the
 // system modules' threads are above ours there anyway.
 static bool core1_share(void)
@@ -223,6 +232,7 @@ static void merge_thread(void *arg)
 	job->threads = g_mergeSlot.threadCount;
 	job->spawn = g_mergeSlot.threadCount > 1 ? spawn_merge_helper : NULL;
 	job->join = join_merge_helper;
+	job->yield = yield_merge_thread;
 	// HDR: camera B's frames are hdrRatio times shorter at the same gain. hdrSensitivityB stays 0, merge.c's
 	// default: a dim scene would measure it too low.
 	job->hdr = request->hdr && request->frameCountB > 0;

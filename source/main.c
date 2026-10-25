@@ -157,6 +157,7 @@ static void stop_modules(const Screens *screens)
 int main(void)
 {
 	Screens screens;
+	toast_init();
 	start_graphics(&screens);
 	ptmuInit();
 	APT_CheckNew3DS(&g_isNew3ds);

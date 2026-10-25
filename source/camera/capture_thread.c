@@ -76,39 +76,31 @@ void capture_thread_reset_port(CamPort *port, u64 now)
 	port->framesDone = 0;
 	port->periodTicks = 0;
 	port->lastTick = 0;
-	port->startMs = now;
 	port->fpsStart = now;
 	port->lastFrameMs = now;
 	port->fpsFrames = 0;
 }
 
-// A single stream with CAM_RESTART_HISTORY_LENGTH restarts in a short time asks for a new start.
-static void note_single_restart(u64 now)
+// CAM_RESTART_HISTORY_LENGTH restarts within windowMs raise the flag, and the history starts again.
+static void note_restart(CamRestartHistory *history, u64 now, u32 windowMs, _Atomic bool *flag)
 {
-	u32 slot = g_camera.singleRestartCount % CAM_RESTART_HISTORY_LENGTH;
-	g_camera.singleRestartCount++;
-	g_camera.singleRestartTimes[slot] = now;
+	u32 count = atomic_fetch_add(&history->count, 1) + 1;
+	history->times[(count - 1) % CAM_RESTART_HISTORY_LENGTH] = now;
 	// The slot written next holds the oldest of the last restarts.
-	u32 oldest = g_camera.singleRestartCount % CAM_RESTART_HISTORY_LENGTH;
-	u64 span = now - g_camera.singleRestartTimes[oldest];
-	bool historyFull = g_camera.singleRestartCount >= CAM_RESTART_HISTORY_LENGTH;
-	if (historyFull && span < STORM_WINDOW_MS && !g_camera.restartStorm) {
-		g_camera.restartStorm = true;
-		g_camera.singleRestartCount = 0;
+	u64 span = now - history->times[count % CAM_RESTART_HISTORY_LENGTH];
+	bool historyFull = count >= CAM_RESTART_HISTORY_LENGTH;
+	if (historyFull && span < windowMs && !*flag) {
+		*flag = true;
+		history->count = 0;
 	}
 }
 
-// A dual stream with CAM_RESTART_HISTORY_LENGTH restarts in a longer time is given up.
-static void note_dual_restart(u64 now)
+// Only the handle: StopCapture is what cancels the receive itself.
+static void close_receive(CamPort *port)
 {
-	u32 slot = g_camera.dualRestartCount % CAM_RESTART_HISTORY_LENGTH;
-	g_camera.dualRestartCount++;
-	g_camera.dualRestartTimes[slot] = now;
-	u32 oldest = g_camera.dualRestartCount % CAM_RESTART_HISTORY_LENGTH;
-	u64 span = now - g_camera.dualRestartTimes[oldest];
-	bool historyFull = g_camera.dualRestartCount >= CAM_RESTART_HISTORY_LENGTH;
-	if (historyFull && span < DUAL_UNSTABLE_WINDOW_MS && !g_camera.dualBroken) {
-		g_camera.dualBroken = true;
+	if (port->receiveEvent) {
+		svcCloseHandle(port->receiveEvent);
+		port->receiveEvent = 0;
 	}
 }
 
@@ -118,10 +110,7 @@ static void restart_port(int portIndex, bool countsTowardStorm)
 	CamPort *port = &g_camera.ports[portIndex];
 	u32 cameraPort = g_camera.portIds[portIndex];
 	CAMU_StopCapture(cameraPort);
-	if (port->receiveEvent) {
-		svcCloseHandle(port->receiveEvent);
-		port->receiveEvent = 0;
-	}
+	close_receive(port);
 	LightLock_Lock(&g_camera.lock);
 	if (port->armedSlot >= 0 && g_camera.burst.active) {
 		g_camera.burst.lost[portIndex] = true;
@@ -139,7 +128,6 @@ static void restart_port(int portIndex, bool countsTowardStorm)
 	}
 	CAMU_StartCapture(cameraPort);
 	u64 now = osGetTime();
-	port->startMs = now;
 	port->lastRestartMs = now;
 	port->lastFrameMs = now;
 	port->restartDue = false;
@@ -149,10 +137,10 @@ static void restart_port(int portIndex, bool countsTowardStorm)
 	g_camera.unverifiedUntil = now + CAM_UNVERIFIED_AFTER_START_MS;
 	sensor_exposure_ask_guard();
 	if (countsTowardStorm && !g_camera.dual) {
-		note_single_restart(now);
+		note_restart(&g_camera.singleRestartHistory, now, STORM_WINDOW_MS, &g_camera.restartStorm);
 	}
 	if (countsTowardStorm && g_camera.dual && both_ports(g_camera.streamingPorts)) {
-		note_dual_restart(now);
+		note_restart(&g_camera.dualRestartHistory, now, DUAL_UNSTABLE_WINDOW_MS, &g_camera.dualBroken);
 	}
 }
 
@@ -429,10 +417,7 @@ static void stop_port(int portIndex)
 {
 	CamPort *port = &g_camera.ports[portIndex];
 	CAMU_StopCapture(g_camera.portIds[portIndex]);
-	if (port->receiveEvent) {
-		svcCloseHandle(port->receiveEvent);
-		port->receiveEvent = 0;
-	}
+	close_receive(port);
 	LightLock_Lock(&g_camera.lock);
 	port->armedDestination = NULL;
 	port->armedSlot = -1;
@@ -519,10 +504,7 @@ static void idle_while_paused(void)
 {
 	for (int i = 0; i < CAM_PORT_COUNT; i++) {
 		CamPort *port = &g_camera.ports[i];
-		if (port->receiveEvent) {
-			svcCloseHandle(port->receiveEvent);
-			port->receiveEvent = 0;
-		}
+		close_receive(port);
 		if (port->armedDestination) {
 			LightLock_Lock(&g_camera.lock);
 			if (g_camera.burst.active && port->armedSlot >= 0) {
@@ -625,11 +607,7 @@ void capture_thread_run(void *arg)
 		service_streaming_ports();
 	}
 	for (int i = 0; i < CAM_PORT_COUNT; i++) {
-		CamPort *port = &g_camera.ports[i];
-		if (port->receiveEvent) {
-			svcCloseHandle(port->receiveEvent);
-			port->receiveEvent = 0;
-		}
+		close_receive(&g_camera.ports[i]);
 	}
 	g_camera.busy = false;
 }

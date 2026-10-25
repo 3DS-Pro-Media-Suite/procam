@@ -574,10 +574,10 @@ static void draw_merge_pill(void)
 }
 
 // The toast: an opaque pill above the bottom strip.
-static void draw_toast(void)
+static void draw_toast(const char *toastText)
 {
 	C2D_Text text;
-	C2D_TextFontParse(&text, g_fontSmall, g_textBuffer, g_toastText);
+	C2D_TextFontParse(&text, g_fontSmall, g_textBuffer, toastText);
 	float scale = ui_text_font_scale(g_fontSmall);
 	float width;
 	float height;
@@ -585,7 +585,7 @@ static void draw_toast(void)
 	ui_shapes_round_rect(TOP_CENTER_X - width / 2 - TOAST_PADDING_X, TOAST_Y, width + 2 * TOAST_PADDING_X,
 	                     TOAST_HEIGHT, TOAST_RADIUS, PILL_COLOR, DEPTH_PILL);
 	ui_text_draw_string(g_fontSmall, TOP_CENTER_X, TOAST_TEXT_Y, 1, COLOR_INK, TEXT_ALIGN_CENTER, 0,
-	                    g_toastText);
+	                    toastText);
 }
 
 void viewfinder_draw(int eye)
@@ -632,8 +632,9 @@ void viewfinder_draw(int eye)
 	if (background_merge_active()) {
 		draw_merge_pill();
 	}
-	if (now < g_toastUntil) {
-		draw_toast();
+	char toastText[TOAST_TEXT_SIZE];
+	if (toast_current(now, toastText)) {
+		draw_toast(toastText);
 	}
 }
 

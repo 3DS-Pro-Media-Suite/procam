@@ -67,6 +67,8 @@ typedef struct {
 	int threads; // 1..MERGE_MAX_THREADS, the caller included
 	void *(*spawn)(void (*fn)(void *arg), void *arg, int worker);
 	void (*join)(void *handle);
+	// A thread that has to wait for another calls yield to give its core away for a moment (NULL: it spins).
+	void (*yield)(void);
 	// HDR needs B frames, else camera A is merged alone. hdrRatio is camera A's exposure over camera B's,
 	// (linesA x gainA) / (linesB x gainB), at least 1. gain is then camera A's gain code and gainB camera B's
 	// (0: the same as gain). B_k is taken at the same instant as A_k. hdrSensitivityB is camera B's own

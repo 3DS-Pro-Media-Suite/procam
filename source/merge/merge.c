@@ -328,7 +328,7 @@ static int mosaic_index(int plane, int y, int x)
 
 // Takes a free stash slot for a tile row. One is always free: a stash lives while its row or the row above
 // runs, so at most 2 x threads - 1 are in use when a row asks. If another thread takes the slot a scan is
-// heading for, the scan goes round again.
+// heading for, the scan yields its core and goes round again.
 static float *take_stash_slot(MergeContext *context, int row)
 {
 	for (;;) {
@@ -337,6 +337,9 @@ static float *take_stash_slot(MergeContext *context, int row)
 				context->slot[row] = slot;
 				return context->stash + (size_t)slot * STASH_FLOATS;
 			}
+		}
+		if (context->job->yield) {
+			context->job->yield();
 		}
 	}
 }

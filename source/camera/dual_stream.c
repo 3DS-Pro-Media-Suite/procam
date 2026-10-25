@@ -354,7 +354,7 @@ void dual_stream_set_wanted(bool on)
 		// Leaving the mode gives dual another try, with a clean history, when it is chosen again.
 		g_camera.dualBroken = false;
 		g_camera.burstFails = 0;
-		g_camera.dualRestartCount = 0;
+		g_camera.dualRestartHistory.count = 0;
 	}
 	g_camera.dualWanted = on;
 }

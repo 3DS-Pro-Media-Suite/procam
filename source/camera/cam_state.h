@@ -46,47 +46,58 @@ enum {
 };
 
 // One camera port's stream: a ring of CAM_RING_FRAMES frames for the live view, the receive waiting on the
-// port, and its health.
+// port, and its health. A plain u64 is two words on the ARM11 and a read can tear, so every u64 another
+// thread writes or reads is _Atomic (ldrexd / strexd).
 typedef struct {
+	// Set by the camera thread while the capture thread is paused.
 	// NULL on a port that only streams for bursts (the other camera of a dual stream).
 	u16 *ring[CAM_RING_FRAMES];
+	Handle errorEvent; // the port's buffer error event
 	// fill, ready, reading, newFrame, armedDestination and armedSlot are guarded by g_camera.lock.
 	int fill;
 	int ready;
 	int reading;
 	bool newFrame;
-	Handle receiveEvent; // the pending receive
-	Handle errorEvent; // the port's buffer error event
 	// Where the pending receive writes: a burst buffer or g_camera.sink. NULL: the ring (ring[fill]).
 	u8 *armedDestination;
 	int armedSlot; // that burst buffer's index (-1: the ring or the sink)
+	// The capture thread's own: other threads reset them only while it is paused.
+	Handle receiveEvent; // the pending receive
+	// A buffer error came too soon after the last restart: restart once that is long enough ago.
+	bool restartDue;
+	u64 lastRestartMs;
+	u32 fpsFrames;
+	// Shared between the capture thread and the camera and main threads: atomics.
 	// Restart the port for a burst: StopCapture cancels a receive still aimed at a burst buffer.
 	_Atomic bool restartForBurst;
 	// Stop the port once its burst frames are in. The capture thread does it.
 	_Atomic bool stopAfterBurst;
-	// A buffer error came too soon after the last restart: restart once that is long enough ago.
-	bool restartDue;
-	_Atomic u32 framesDone; // frames the port finished since the stream (re)started
-	u64 lastTick; // system tick of the port's last frame
-	u64 lastFrameMs; // osGetTime of the last frame or restart, for stall detection
-	u64 lastRestartMs;
-	u64 startMs; // osGetTime of the port's last StartCapture, by the stream or a restart
-	u64 periodTicks; // the frame period, averaged
 	// The frame length changed (an HDR burst): the period average starts again from the next frame.
 	_Atomic bool resetPeriodAverage;
+	_Atomic u32 framesDone; // frames the port finished since the stream (re)started
+	_Atomic u64 lastTick; // system tick of the port's last frame
+	_Atomic u64 lastFrameMs; // osGetTime of the last frame or restart, for stall detection
+	_Atomic u64 periodTicks; // the frame period, averaged
+	_Atomic u64 fpsStart;
 	_Atomic u32 frames;
 	_Atomic u32 restarts;
 	_Atomic u32 bufferErrors;
-	u32 fpsFrames;
-	u64 fpsStart;
 	_Atomic float fps;
 } CamPort;
+
+// The times of a stream's last restarts, to judge whether it is stable. The capture thread notes them; the
+// camera thread may clear count, so it is atomic.
+typedef struct {
+	u64 times[CAM_RESTART_HISTORY_LENGTH];
+	_Atomic u32 count;
+} CamRestartHistory;
 
 // A capture thread re-arms the receive the moment a frame completes. Re-arming from the main loop, once per
 // frame, comes too late: the sensor overruns its buffer and the stream keeps dying.
 typedef struct {
 	bool initialized;
-	bool running; // configured and started (main thread only)
+	bool running; // configured and started; the capture thread never writes it
+	// The pause handshake between the camera thread and the capture thread: atomics.
 	_Atomic bool streamWanted; // the capture thread should stream
 	_Atomic bool busy; // the capture thread is inside its streaming loop
 	_Atomic bool quit;
@@ -94,6 +105,8 @@ typedef struct {
 	Handle wakeEvent; // wakes the capture thread: a pause, a resume, a port added for a burst
 	// Guards the rings (fill, ready, reading, newFrame), armedDestination, the burst claim and the ports.
 	LightLock lock;
+	// The stream's set-up, written by the camera thread. What the capture thread reads changes only while it
+	// is paused.
 	CamSettings settings;
 	CamPort ports[CAM_PORT_COUNT];
 	// Bit c set: ports[c] streams. Single: bit 0. Dual: the view's port, and both during a burst.
@@ -136,16 +149,17 @@ typedef struct {
 	u16 frameLinesSaved[CAM_PORT_COUNT]; // OUT1's and OUT2's own frame length before dual
 	u8 *sink; // dual: where the other port's frames go outside a burst (one frame)
 	u32 burstFails; // dual bursts failed in a row
-	// Dual: the times of the last restarts, to spot an unstable stream. Kept across the stream's restarts and
-	// cleared when dual is turned off.
-	u64 dualRestartTimes[CAM_RESTART_HISTORY_LENGTH];
-	u32 dualRestartCount;
+	// Dual: the last restarts, to spot an unstable stream. Kept across the stream's restarts and cleared when
+	// dual is turned off.
+	CamRestartHistory dualRestartHistory;
+	// Written under g_camera.lock, mostly by the capture thread: atomics.
 	// Camera B's framesDone minus camera A's, of two frames that finished together.
 	_Atomic s32 pairOffset;
 	_Atomic u64 pairAtMs; // osGetTime of the last such pair
 
 	// The exposure as the app last wrote it, and the guard against the module switching the sensors' own
 	// AE / AWB back on.
+	// Written by the main and camera threads in turn, as the app keeps them apart. None is over 16 bits.
 	u16 exposureLines;
 	u16 exposureGain;
 	u16 exposureFineTime; // the fine integration time written with it (0: none written yet)
@@ -153,10 +167,10 @@ typedef struct {
 	u16 aeR9Lines; // AE_R9 (MCU register 0x2222) as last written on the streaming sensors (0: not known)
 	// The time sensor_exposure_park cut for a stop: auto exposure starts again from it.
 	u16 parkedLines;
-	// A single stream's last restart times, and whether a storm of them happened (cam_stream_restart_storm).
-	u64 singleRestartTimes[CAM_RESTART_HISTORY_LENGTH];
-	u32 singleRestartCount;
-	_Atomic bool restartStorm;
+	bool guardSeenPending; // the last sensor_exposure_read left a request pending
+	// The app calls sensor_exposure_guard itself, so sensor_exposure_read never runs it as a fallback.
+	bool guardByCaller;
+	// Written by any thread, the capture thread's restarts included: atomics.
 	// The view port's framesDone at the last exposure write: bursts let it settle.
 	_Atomic u32 exposureWriteFrame;
 	_Atomic u64 unverifiedUntil; // a (re)start's window in which the module may switch AE / AWB back on
@@ -164,18 +178,21 @@ typedef struct {
 	_Atomic bool guardRequested;
 	// The guard is due from this osGetTime on (0: at once).
 	_Atomic u64 guardDueMs;
-	bool guardSeenPending; // the last sensor_exposure_read left a request pending
-	// The app calls sensor_exposure_guard itself, so sensor_exposure_read never runs it as a fallback.
-	bool guardByCaller;
+	// A single stream's last restarts, and whether a storm of them happened (cam_stream_restart_storm).
+	CamRestartHistory singleRestartHistory;
+	_Atomic bool restartStorm;
 
 	// An HDR burst holds the two dual sensors at their own integration times, and at a longer frame when a
 	// time needs one, until it restores them. Live exposure changes are only noted meanwhile.
+	// Written by the camera thread; the others read atomics and a 16-bit length.
 	_Atomic bool hdrOn;
 	u16 hdrFrameLines; // the frame length both run meanwhile (0: no HDR burst, the dual frame)
 	// The line time stays as it is until then: the frame rate it comes from still covers an HDR burst's
 	// longer frames.
 	_Atomic u64 lineHoldUntil;
 
+	// The camera thread claims the frames and the capture thread fills them, both under g_camera.lock.
+	// frameTicks is read without it once the claim has ended.
 	struct {
 		_Atomic bool active;
 		int frameCount;

@@ -179,8 +179,9 @@ static void draw_ftp_button(bool ftpOn)
 // A toast, else the FTP address while the server runs.
 static void draw_status_line(bool ftpOn, const char *ftpAddress)
 {
-	if (osGetTime() < g_toastUntil) {
-		ui_text_draw(g_fontSmall, BOTTOM_CENTER_X, STATUS_Y, COLOR_RED, TEXT_ALIGN_CENTER, "%s", g_toastText);
+	char toastText[TOAST_TEXT_SIZE];
+	if (toast_current(osGetTime(), toastText)) {
+		ui_text_draw(g_fontSmall, BOTTOM_CENTER_X, STATUS_Y, COLOR_RED, TEXT_ALIGN_CENTER, "%s", toastText);
 	} else if (ftpAddress) {
 		ui_text_draw(g_fontSmall, BOTTOM_CENTER_X, STATUS_Y, COLOR_ACCENT, TEXT_ALIGN_CENTER, "ftp://%s",
 		             ftpAddress);

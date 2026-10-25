@@ -115,8 +115,10 @@ static int single_frame_lines(void)
 // A port's frame time in ms: its period, or the nominal one before its first frames.
 static double frame_ms(const CamPort *port)
 {
-	if (port->periodTicks) {
-		return (double)port->periodTicks / CPU_TICKS_PER_MSEC;
+	// Read once: the capture thread may reset it in between.
+	u64 periodTicks = port->periodTicks;
+	if (periodTicks) {
+		return (double)periodTicks / CPU_TICKS_PER_MSEC;
 	}
 	int frameLines = g_camera.dual ? cam_state_frame_lines() : single_frame_lines();
 	double frameMicroseconds = frameLines * sensor_exposure_line_microseconds();

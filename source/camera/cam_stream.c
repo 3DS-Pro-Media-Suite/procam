@@ -108,20 +108,25 @@ Result cam_stream_init(void)
 	return 0;
 }
 
-static void end_capture_thread(void)
+// Returns whether the thread has ended. One still inside a slow camera service call keeps its wake event and
+// finishes that call first: quit stays set, so it ends right after.
+static bool end_capture_thread(void)
 {
 	g_camera.quit = true;
 	if (g_camera.wakeEvent) {
 		svcSignalEvent(g_camera.wakeEvent);
 	}
-	if (g_camera.thread) {
-		threadJoin(g_camera.thread, CAPTURE_THREAD_JOIN_TIMEOUT_NS);
-		threadFree(g_camera.thread);
+	// A timeout returns a code that R_SUCCEEDED accepts, so only 0 means the thread has ended.
+	if (g_camera.thread && threadJoin(g_camera.thread, CAPTURE_THREAD_JOIN_TIMEOUT_NS) != 0) {
+		return false;
 	}
+	threadFree(g_camera.thread);
+	g_camera.thread = NULL;
 	if (g_camera.wakeEvent) {
 		svcCloseHandle(g_camera.wakeEvent);
 		g_camera.wakeEvent = 0;
 	}
+	return true;
 }
 
 void cam_stream_exit(void)
@@ -131,7 +136,8 @@ void cam_stream_exit(void)
 	}
 	sensor_exposure_park();
 	capture_thread_pause();
-	end_capture_thread();
+	bool threadEnded = end_capture_thread();
+	// Queued behind any call of the capture thread: no receive it armed writes into the buffers freed below.
 	CAMU_StopCapture(PORT_BOTH);
 	if (g_camera.dual) {
 		dual_stream_exit();
@@ -152,7 +158,10 @@ void cam_stream_exit(void)
 		}
 	}
 	free(g_camera.sink);
-	memset(&g_camera, 0, sizeof g_camera);
+	// A thread that has not ended still reads g_camera, its quit flag and lock included.
+	if (threadEnded) {
+		memset(&g_camera, 0, sizeof g_camera);
+	}
 }
 
 static bool wants_dual_stream(const CamSettings *settings)
